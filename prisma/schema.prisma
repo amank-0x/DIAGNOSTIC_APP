@@ -1,0 +1,466 @@
+// ==============================================================================
+// B.L. DIAGNOSTIC CENTER — PRISMA POSTGRESQL SCHEMA
+// Primary Source of Truth: PostgreSQL
+// Operational & Reporting Sync Layer: Google Sheets (16 Worksheets)
+// ==============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ------------------------------------------------------------------------------
+// ENUMS
+// ------------------------------------------------------------------------------
+
+enum UserRole {
+  USER
+  STAFF
+  ADMIN
+}
+
+enum AccountStatus {
+  ACTIVE
+  DEACTIVATED
+}
+
+enum Gender {
+  Male
+  Female
+  Other
+}
+
+enum CollectionType {
+  HOME_COLLECTION
+  CENTER_VISIT
+}
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  COLLECTION_ASSIGNED
+  SAMPLE_COLLECTED
+  COMPLETED
+  CANCELLED
+}
+
+enum LeadStatus {
+  NEW
+  CONTACTED
+  CONVERTED
+  CLOSED
+}
+
+enum EnquiryStatus {
+  NEW
+  IN_PROGRESS
+  RESOLVED
+}
+
+enum SyncStatus {
+  PENDING
+  SUCCESS
+  FAILED
+}
+
+// ------------------------------------------------------------------------------
+// 1. USERS (Worksheet: Users — Mobile Number + OTP Primary Identity)
+// ------------------------------------------------------------------------------
+model User {
+  id            String         @id @default(uuid())
+  mobileNumber  String         @unique @map("mobile_number") // e.g., +919649183422
+  name          String?
+  role          UserRole       @default(USER)
+  isVerified    Boolean        @default(true) @map("is_verified")
+  isActive      Boolean        @default(true) @map("is_active")
+  createdAt     DateTime       @default(now()) @map("created_at")
+  updatedAt     DateTime       @updatedAt @map("updated_at")
+  lastLoginAt   DateTime?      @map("last_login_at")
+
+  patients      Patient[]
+  bookings      Booking[]
+  notifications Notification[]
+  sessions      UserSession[]
+  auditLogs     AuditLog[]     @relation("ActorAuditLogs")
+
+  @@index([mobileNumber])
+  @@index([role, isActive])
+  @@map("users")
+}
+
+// ------------------------------------------------------------------------------
+// 1A. OTP VERIFICATIONS (Server-Side Hashed OTP Store)
+// ------------------------------------------------------------------------------
+model OtpVerification {
+  id           String    @id @default(uuid())
+  mobileNumber String    @map("mobile_number")
+  otpHash      String    @map("otp_hash")
+  expiresAt    DateTime  @map("expires_at")
+  attempts     Int       @default(0)
+  maxAttempts  Int       @default(5) @map("max_attempts")
+  verified     Boolean   @default(false)
+  verifiedAt   DateTime? @map("verified_at")
+  ipAddress    String?   @map("ip_address")
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  @@index([mobileNumber, verified])
+  @@index([expiresAt])
+  @@map("otp_verifications")
+}
+
+// ------------------------------------------------------------------------------
+// 1B. USER SESSIONS (Server-Side Session Store)
+// ------------------------------------------------------------------------------
+model UserSession {
+  id           String   @id @default(uuid())
+  userId       String   @map("user_id")
+  mobileNumber String   @map("mobile_number")
+  tokenHash    String   @unique @map("token_hash")
+  expiresAt    DateTime @map("expires_at")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("user_sessions")
+}
+
+// ------------------------------------------------------------------------------
+// 2. PATIENTS (Worksheet: Patients)
+// ------------------------------------------------------------------------------
+model Patient {
+  id             String           @id @default(cuid())
+  userId         String           @map("user_id")
+  patientName    String           @map("patient_name")
+  dateOfBirth    DateTime?        @map("date_of_birth")
+  age            Int
+  gender         Gender
+  relation       String           @default("Self")
+  phone          String?
+  status         AccountStatus    @default(ACTIVE)
+  createdAt      DateTime         @default(now()) @map("created_at")
+  updatedAt      DateTime         @updatedAt @map("updated_at")
+
+  user           User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bookings       Booking[]
+  homeCollection HomeCollection[]
+  reports        Report[]
+
+  @@index([userId])
+  @@index([patientName])
+  @@index([phone])
+  @@map("patients")
+}
+
+// ------------------------------------------------------------------------------
+// 3. TEST CATEGORIES (Worksheet: Test_Categories)
+// ------------------------------------------------------------------------------
+model TestCategory {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  slug        String   @unique
+  description String?
+  status      String   @default("ACTIVE")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  tests       Test[]
+
+  @@index([slug])
+  @@map("test_categories")
+}
+
+// ------------------------------------------------------------------------------
+// 4. TESTS / COMPLETE RATE LIST (Worksheet: Tests)
+// ------------------------------------------------------------------------------
+model Test {
+  id                  String        @id // e.g., BLD-T001
+  testName            String        @map("test_name")
+  category            String
+  categoryId          String?       @map("category_id")
+  method              String?
+  sample              String?
+  sampleInstructions  String?       @map("sample_instructions")
+  clinicalInformation String?       @map("clinical_information")
+  reportingTime       String?       @map("reporting_time")
+  generalPrice        Decimal?      @map("general_price") @db.Decimal(10, 2)
+  corporatePrice      Decimal?      @map("corporate_price") @db.Decimal(10, 2)
+  status              String        @default("ACTIVE")
+  needsReview         Boolean       @default(false) @map("needs_review")
+  reviewReason        String?       @map("review_reason")
+  createdAt           DateTime      @default(now()) @map("created_at")
+  updatedAt           DateTime      @updatedAt @map("updated_at")
+
+  categoryRel         TestCategory? @relation(fields: [categoryId], references: [id])
+  packageItems        PackageItem[]
+  bookingItems        BookingItem[]
+
+  @@index([testName])
+  @@index([category])
+  @@index([status])
+  @@map("tests")
+}
+
+// ------------------------------------------------------------------------------
+// 5. PACKAGES (Worksheet: Packages)
+// ------------------------------------------------------------------------------
+model Package {
+  id              String        @id // e.g., BLD-PKG01
+  packageName     String        @map("package_name")
+  description     String?
+  price           Decimal       @db.Decimal(10, 2)
+  fastingRequired Boolean       @default(true) @map("fasting_required")
+  fastingHours    Int?          @map("fasting_hours")
+  turnaroundTime  String?       @map("turnaround_time")
+  status          String        @default("ACTIVE")
+  createdAt       DateTime      @default(now()) @map("created_at")
+  updatedAt       DateTime      @updatedAt @map("updated_at")
+
+  items           PackageItem[]
+
+  @@index([status])
+  @@map("packages")
+}
+
+// ------------------------------------------------------------------------------
+// 6. PACKAGE ITEMS (Worksheet: Package_Items)
+// ------------------------------------------------------------------------------
+model PackageItem {
+  id        String   @id @default(cuid())
+  packageId String   @map("package_id")
+  testId    String?  @map("test_id")
+  testName  String   @map("test_name")
+  category  String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  pkg       Package  @relation(fields: [packageId], references: [id], onDelete: Cascade)
+  test      Test?    @relation(fields: [testId], references: [id], onDelete: SetNull)
+
+  @@index([packageId])
+  @@index([testId])
+  @@map("package_items")
+}
+
+// ------------------------------------------------------------------------------
+// 7. BOOKINGS (Worksheet: Bookings)
+// ------------------------------------------------------------------------------
+model Booking {
+  id                   String          @id @default(cuid())
+  bookingNumber        String          @unique @map("booking_number") // BL-2026-000001
+  userId               String          @map("user_id")
+  patientId            String          @map("patient_id")
+  patientNameSnapshot  String          @map("patient_name_snapshot")
+  patientPhoneSnapshot String          @map("patient_phone_snapshot")
+  bookingDate          String          @map("booking_date")
+  bookingTime          String          @map("booking_time")
+  collectionType       CollectionType  @map("collection_type")
+  address              String?
+  totalAmount          Decimal         @map("total_amount") @db.Decimal(10, 2)
+  status               BookingStatus   @default(PENDING)
+  assignedPhlebotomist String?         @map("assigned_phlebotomist")
+  internalNotes        String?         @map("internal_notes")
+  createdAt            DateTime        @default(now()) @map("created_at")
+  updatedAt            DateTime        @updatedAt @map("updated_at")
+
+  user                 User            @relation(fields: [userId], references: [id])
+  patient              Patient         @relation(fields: [patientId], references: [id])
+  items                BookingItem[]
+  homeCollection       HomeCollection?
+  reports              Report[]
+
+  @@index([bookingNumber])
+  @@index([userId])
+  @@index([patientId])
+  @@index([bookingDate, status])
+  @@index([collectionType, status])
+  @@map("bookings")
+}
+
+// ------------------------------------------------------------------------------
+// 8. BOOKING ITEMS (Worksheet: Booking_Items)
+// ------------------------------------------------------------------------------
+model BookingItem {
+  id               String   @id @default(cuid())
+  bookingId        String   @map("booking_id")
+  testId           String   @map("test_id")
+  testNameSnapshot String   @map("test_name_snapshot")
+  priceSnapshot    Decimal  @map("price_snapshot") @db.Decimal(10, 2)
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  booking          Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  test             Test?    @relation(fields: [testId], references: [id], onDelete: SetNull)
+
+  @@index([bookingId])
+  @@index([testId])
+  @@map("booking_items")
+}
+
+// ------------------------------------------------------------------------------
+// 9. HOME COLLECTION (Worksheet: Home_Collection)
+// ------------------------------------------------------------------------------
+model HomeCollection {
+  id        String        @id @default(cuid())
+  bookingId String        @unique @map("booking_id")
+  patientId String        @map("patient_id")
+  address   String
+  area      String?
+  pincode   String?
+  status    BookingStatus @default(PENDING)
+  createdAt DateTime      @default(now()) @map("created_at")
+  updatedAt DateTime      @updatedAt @map("updated_at")
+
+  booking   Booking       @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  patient   Patient       @relation(fields: [patientId], references: [id])
+
+  @@index([bookingId])
+  @@index([patientId])
+  @@index([pincode, status])
+  @@map("home_collection")
+}
+
+// ------------------------------------------------------------------------------
+// 10. REPORTS (Worksheet: Reports — Metadata & Secure References ONLY)
+// ------------------------------------------------------------------------------
+model Report {
+  id            String   @id // REP-BL-2026-000001
+  bookingId     String   @map("booking_id")
+  patientId     String   @map("patient_id")
+  userId        String   @map("user_id")
+  reportName    String   @map("report_name")
+  fileReference String   @map("file_reference") // e.g., private://reports/REP-... (NEVER public URL or raw file in Sheets)
+  fileHash      String   @map("file_hash")      // SHA-256 checksum
+  mimeType      String   @map("mime_type")
+  fileSize      Int      @map("file_size")
+  version       Int      @default(1)
+  status        String   @default("ACTIVE")
+  uploadedBy    String   @map("uploaded_by")
+  uploadedAt    DateTime @default(now()) @map("uploaded_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  booking       Booking  @relation(fields: [bookingId], references: [id])
+  patient       Patient  @relation(fields: [patientId], references: [id])
+
+  @@index([bookingId])
+  @@index([patientId])
+  @@index([userId, status])
+  @@map("reports")
+}
+
+// ------------------------------------------------------------------------------
+// 11. LEADS (Worksheet: Leads)
+// ------------------------------------------------------------------------------
+model Lead {
+  id            String     @id @default(cuid())
+  name          String
+  phone         String
+  source        String
+  message       String?
+  status        LeadStatus @default(NEW)
+  internalNotes String?    @map("internal_notes")
+  createdAt     DateTime   @default(now()) @map("created_at")
+  updatedAt     DateTime   @updatedAt @map("updated_at")
+
+  @@index([status, createdAt])
+  @@index([phone])
+  @@map("leads")
+}
+
+// ------------------------------------------------------------------------------
+// 12. CONTACT ENQUIRIES (Worksheet: Contact_Enquiries)
+// ------------------------------------------------------------------------------
+model ContactEnquiry {
+  id            String        @id @default(cuid())
+  name          String
+  phone         String
+  email         String?
+  message       String
+  status        EnquiryStatus @default(NEW)
+  internalNotes String?       @map("internal_notes")
+  createdAt     DateTime      @default(now()) @map("created_at")
+  updatedAt     DateTime      @updatedAt @map("updated_at")
+
+  @@index([status, createdAt])
+  @@index([phone])
+  @@map("contact_enquiries")
+}
+
+// ------------------------------------------------------------------------------
+// 13. NOTIFICATIONS (Worksheet: Notifications)
+// ------------------------------------------------------------------------------
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  title     String
+  message   String
+  type      String
+  isRead    Boolean  @default(false) @map("is_read")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead])
+  @@map("notifications")
+}
+
+// ------------------------------------------------------------------------------
+// 14. ANALYTICS (Worksheet: Analytics)
+// ------------------------------------------------------------------------------
+model AnalyticsSnapshot {
+  id          String   @id @default(cuid())
+  metricDate  String   @unique @map("metric_date") // YYYY-MM-DD
+  metricGroup String   @map("metric_group")
+  metricKey   String   @map("metric_key")
+  metricValue Decimal  @map("metric_value") @db.Decimal(12, 2)
+  notes       String?
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@index([metricDate, metricGroup])
+  @@map("analytics")
+}
+
+// ------------------------------------------------------------------------------
+// 15. AUDIT LOGS (Worksheet: Audit_Logs)
+// ------------------------------------------------------------------------------
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorUid   String   @map("actor_uid")
+  actorEmail String   @map("actor_email")
+  actorRole  String   @map("actor_role")
+  action     String
+  entityType String   @map("entity_type")
+  entityId   String   @map("entity_id")
+  details    String
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  actor      User?    @relation("ActorAuditLogs", fields: [actorUid], references: [id], onDelete: SetNull)
+
+  @@index([entityType, entityId])
+  @@index([actorUid, createdAt])
+  @@map("audit_logs")
+}
+
+// ------------------------------------------------------------------------------
+// 16. SYNC LOG (Worksheet: Sync_Log)
+// ------------------------------------------------------------------------------
+model SyncLog {
+  syncId        String     @id @default(cuid()) @map("sync_id")
+  entityType    String     @map("entity_type")
+  entityId      String     @map("entity_id")
+  operation     String     // CREATE | UPDATE | DELETE | BULK_SYNC | INBOUND_IMPORT
+  status        SyncStatus @default(PENDING)
+  attemptCount  Int        @default(1) @map("attempt_count")
+  lastAttemptAt DateTime   @default(now()) @map("last_attempt_at")
+  errorMessage  String?    @map("error_message")
+  createdAt     DateTime   @default(now()) @map("created_at")
+  updatedAt     DateTime   @updatedAt @map("updated_at")
+
+  @@index([status, lastAttemptAt])
+  @@index([entityType, entityId])
+  @@map("sync_log")
+}

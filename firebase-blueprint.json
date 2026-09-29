@@ -1,0 +1,116 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "User profile with role-based access control",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "phone": { "type": "string" },
+        "role": { "type": "string", "enum": ["USER", "STAFF", "ADMIN"] },
+        "isActive": { "type": "boolean" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["uid", "email", "role"]
+    },
+    "PatientRecord": {
+      "title": "PatientRecord",
+      "description": "Family patient belonging to a user account",
+      "type": "object",
+      "properties": {
+        "patient_id": { "type": "string" },
+        "user_id": { "type": "string" },
+        "full_name": { "type": "string" },
+        "age": { "type": "number" },
+        "gender": { "type": "string", "enum": ["Male", "Female", "Other"] },
+        "relation": { "type": "string" },
+        "phone": { "type": "string" },
+        "is_active": { "type": "boolean" },
+        "created_at": { "type": "string" },
+        "updated_at": { "type": "string" }
+      },
+      "required": ["patient_id", "user_id", "full_name"]
+    },
+    "BookingRecord": {
+      "title": "BookingRecord",
+      "description": "Diagnostic appointment order with immutable test snapshots",
+      "type": "object",
+      "properties": {
+        "booking_id": { "type": "string" },
+        "user_id": { "type": "string" },
+        "patient_id": { "type": "string" },
+        "collection_type": { "type": "string", "enum": ["HOME_COLLECTION", "CENTER_VISIT"] },
+        "status": { "type": "string", "enum": ["PENDING", "CONFIRMED", "COLLECTION_ASSIGNED", "SAMPLE_COLLECTED", "COMPLETED", "CANCELLED"] },
+        "booking_date": { "type": "string" },
+        "time_slot": { "type": "string" },
+        "total_amount": { "type": "number" },
+        "created_at": { "type": "string" },
+        "updated_at": { "type": "string" }
+      },
+      "required": ["booking_id", "user_id", "patient_id", "status"]
+    },
+    "DiagnosticReport": {
+      "title": "DiagnosticReport",
+      "description": "Certified laboratory diagnostic report metadata",
+      "type": "object",
+      "properties": {
+        "report_id": { "type": "string" },
+        "booking_id": { "type": "string" },
+        "user_id": { "type": "string" },
+        "patient_id": { "type": "string" },
+        "patient_name": { "type": "string" },
+        "report_title": { "type": "string" },
+        "file_name": { "type": "string" },
+        "file_size": { "type": "number" },
+        "mime_type": { "type": "string" },
+        "file_hash": { "type": "string" },
+        "is_active": { "type": "boolean" },
+        "version": { "type": "number" },
+        "uploaded_by": { "type": "string" },
+        "uploaded_at": { "type": "string" },
+        "updated_at": { "type": "string" }
+      },
+      "required": ["report_id", "booking_id", "user_id", "file_name", "mime_type", "file_hash"]
+    },
+    "SecureReportPayload": {
+      "title": "SecureReportPayload",
+      "description": "Private encrypted/base64 binary payload of certified report",
+      "type": "object",
+      "properties": {
+        "report_id": { "type": "string" },
+        "booking_id": { "type": "string" },
+        "user_id": { "type": "string" },
+        "data_base64": { "type": "string" },
+        "mime_type": { "type": "string" },
+        "file_hash": { "type": "string" },
+        "created_at": { "type": "string" }
+      },
+      "required": ["report_id", "booking_id", "user_id", "data_base64"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "UserProfile" },
+      "description": "User profiles with roles and account settings"
+    },
+    "/patients/{patientId}": {
+      "schema": { "$ref": "PatientRecord" },
+      "description": "Family patients linked to user accounts"
+    },
+    "/bookings/{bookingId}": {
+      "schema": { "$ref": "BookingRecord" },
+      "description": "Patient test bookings and appointment records"
+    },
+    "/reports/{reportId}": {
+      "schema": { "$ref": "DiagnosticReport" },
+      "description": "Certified diagnostic report records and metadata"
+    },
+    "/secure_report_payloads/{reportId}": {
+      "schema": { "$ref": "SecureReportPayload" },
+      "description": "Restricted private binary payload storage for reports"
+    }
+  }
+}

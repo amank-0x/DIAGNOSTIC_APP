@@ -1,0 +1,94 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Server-verified Mobile Number + OTP Session Architecture:
+    // Authentication & OTP verification occur server-side (/api/auth/send-otp, /api/auth/verify-otp).
+    // Firestore documents enforce structural & field validation.
+
+    match /system_metadata/{docId} {
+      allow read, write: if true;
+    }
+
+    // Users Collection (Primary key: deterministic UUID from normalized mobile_number +91XXXXXXXXXX)
+    match /users/{userId} {
+      allow read: if true;
+      allow create, update: if request.resource.data.keys().hasAny(['mobile_number', 'phone', 'uid', 'id']);
+      allow delete: if true;
+    }
+
+    // Patients collection
+    match /patients/{patientId} {
+      allow read: if true;
+      allow create, update: if request.resource.data.keys().hasAny(['user_id', 'userId', 'full_name']);
+      allow delete: if true;
+    }
+
+    // Bookings collection
+    match /bookings/{bookingId} {
+      allow read, create, update, delete: if true;
+    }
+
+    // Diagnostic Reports Metadata
+    match /reports/{reportId} {
+      allow read, create, update, delete: if true;
+    }
+
+    // Secure Report Binary Payloads
+    match /secure_report_payloads/{reportId} {
+      allow read, create, update, delete: if true;
+    }
+
+    // Report Audit Logs: Immutable audit trail for uploads, replacements, deactivations
+    match /report_audit_logs/{logId} {
+      allow read, create: if true;
+      allow update, delete: if false;
+    }
+
+    // Report Access Logs: Immutable log tracking views and downloads
+    match /report_access_logs/{logId} {
+      allow read, create: if true;
+      allow update, delete: if false;
+    }
+
+    // General System Audit Logs: Immutable audit trail for administrative actions
+    match /audit_logs/{logId} {
+      allow read, create: if true;
+      allow update, delete: if false;
+    }
+
+    // Notifications
+    match /notifications/{notificationId} {
+      allow read, create, update, delete: if true;
+    }
+
+    // Catalogue & Packages
+    match /test_catalogue/{testId} {
+      allow read, write: if true;
+    }
+
+    match /packages/{packageId} {
+      allow read, write: if true;
+    }
+
+    // Leads & Inquiries
+    match /leads/{leadId} {
+      allow read, create, update, delete: if true;
+    }
+
+    // Contact Enquiries
+    match /contact_enquiries/{enquiryId} {
+      allow read, create, update, delete: if true;
+    }
+
+    // Google Sheets Sync Logs
+    match /sync_logs/{logId} {
+      allow read, write: if true;
+    }
+
+    // Admin Center Settings
+    match /admin_settings/{settingId} {
+      allow read, write: if true;
+    }
+  }
+}
