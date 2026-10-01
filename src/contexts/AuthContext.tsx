@@ -1,10 +1,13 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import { onAuthStateChanged, User as FirebaseUser, signOut as firebaseSignOut } from 'firebase/auth';
+import { auth } from '../lib/firebase';
 import { UserProfile, UserRole } from '../types/auth';
 import { fetchCurrentSessionUser, logoutUser } from '../services/authService';
+import { getUserProfileFromFirebaseUser } from '../services/firebaseAuthService';
 
 interface AuthContextType {
   user: UserProfile | null;
-  firebaseUser: null;
+  firebaseUser: FirebaseUser | null;
   isLoading: boolean;
   role: UserRole | null;
   isStaffOrAdmin: boolean;
@@ -26,32 +29,80 @@ const AuthContext = createContext<AuthContextType>({
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<UserProfile | null>(null);
+  const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
 
-  const loadSession = useCallback(async () => {
+  // Synchronize auth state with Firebase Auth and fallback to OTP session
+  useEffect(() => {
+    let isMounted = true;
+
+    const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
+      try {
+        if (fbUser) {
+          const profile = await getUserProfileFromFirebaseUser(fbUser);
+          if (isMounted) {
+            setUser(profile);
+            setFirebaseUser(fbUser);
+          }
+        } else {
+          // Check for active OTP session fallback
+          const otpUser = await fetchCurrentSessionUser();
+          if (isMounted) {
+            setUser(otpUser);
+            setFirebaseUser(null);
+          }
+        }
+      } catch (err) {
+        console.error('Auth state change resolution error:', err);
+        if (isMounted) {
+          setUser(null);
+          setFirebaseUser(null);
+        }
+      } finally {
+        if (isMounted) {
+          setIsLoading(false);
+        }
+      }
+    });
+
+    return () => {
+      isMounted = false;
+      unsubscribe();
+    };
+  }, []);
+
+  const refreshUser = useCallback(async () => {
     try {
-      const profile = await fetchCurrentSessionUser();
-      setUser(profile);
+      if (auth.currentUser) {
+        const profile = await getUserProfileFromFirebaseUser(auth.currentUser);
+        setUser(profile);
+        setFirebaseUser(auth.currentUser);
+      } else {
+        const otpUser = await fetchCurrentSessionUser();
+        setUser(otpUser);
+        setFirebaseUser(null);
+      }
     } catch (e) {
-      console.error('Failed to load session in AuthProvider:', e);
-      setUser(null);
-    } finally {
-      setIsLoading(false);
+      console.error('Failed to refresh user in AuthProvider:', e);
     }
   }, []);
 
-  useEffect(() => {
-    loadSession();
-  }, [loadSession]);
-
-  const refreshUser = async () => {
-    await loadSession();
-  };
-
-  const handleLogout = async () => {
-    await logoutUser();
+  const handleLogout = useCallback(async () => {
+    setIsLoading(true);
+    try {
+      await firebaseSignOut(auth);
+    } catch (e) {
+      console.error('Firebase sign out error:', e);
+    }
+    try {
+      await logoutUser();
+    } catch (e) {
+      console.error('OTP session logout error:', e);
+    }
     setUser(null);
-  };
+    setFirebaseUser(null);
+    setIsLoading(false);
+  }, []);
 
   const role = user?.role || null;
   const isAdmin = role === 'ADMIN';
@@ -61,7 +112,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     <AuthContext.Provider
       value={{
         user,
-        firebaseUser: null,
+        firebaseUser,
         isLoading,
         role,
         isStaffOrAdmin,

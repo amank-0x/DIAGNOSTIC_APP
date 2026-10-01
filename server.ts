@@ -2,7 +2,6 @@ import express, { Request, Response, NextFunction } from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import dotenv from 'dotenv';
-import { google } from 'googleapis';
 import {
   getGoogleSheetsAuthStatus,
   setRuntimeGoogleOAuthConnection,
@@ -50,25 +49,24 @@ import {
 dotenv.config();
 
 // Firebase Admin will be initialized dynamically when needed
-let firebaseAdmin: typeof import('firebase-admin') | null = null;
+let firebaseAdmin: any = null;
 
 async function getFirebaseAdmin() {
-  if (!firebaseAdmin) {
+  if (firebaseAdmin === null) {
     try {
-      firebaseAdmin = await import('firebase-admin');
-      const serviceAccount = process.env.FIREBASE_ADMIN_SERVICE_ACCOUNT
-        ? JSON.parse(process.env.FIREBASE_ADMIN_SERVICE_ACCOUNT)
-        : null;
+      const rawConfig = process.env.FIREBASE_ADMIN_SERVICE_ACCOUNT;
+      if (rawConfig && !rawConfig.includes('your-project-id')) {
+        const mod = await import('firebase-admin');
+        const adminInstance = (mod as any).default || mod;
+        const serviceAccount = JSON.parse(rawConfig);
 
-      if (serviceAccount) {
-        if (!firebaseAdmin.apps.length) {
-          firebaseAdmin.initializeApp({
-            credential: firebaseAdmin.credential.cert(serviceAccount),
+        if (adminInstance.apps && !adminInstance.apps.length) {
+          adminInstance.initializeApp({
+            credential: adminInstance.credential.cert(serviceAccount),
           });
           console.log('Firebase Admin initialized with service account');
         }
-      } else {
-        console.warn('Firebase Admin service account not configured');
+        firebaseAdmin = adminInstance;
       }
     } catch (error) {
       console.warn('Firebase Admin initialization failed:', error);
@@ -76,14 +74,6 @@ async function getFirebaseAdmin() {
   }
   return firebaseAdmin;
 }
-
-// Initialize Google Sheets API with Service Account
-const sheetsAuth = new google.auth.JWT({
-  email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-  key: process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
-  scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-});
-const sheets = google.sheets({ version: 'v4', auth: sheetsAuth });
 
 const PORT = Number(process.env.PORT || 3000);
 const NODE_ENV = process.env.NODE_ENV || 'development';
@@ -381,8 +371,8 @@ async function startServer() {
 
   /**
    * POST /api/register-sync
-   * Syncs Firebase user registration to Google Sheets.
-   * Verifies Firebase ID token and appends row to Registrations sheet.
+   * Syncs Firebase user registration to Google Sheets via Apps Script.
+   * Verifies Firebase ID token and calls Apps Script to write to sheet.
    */
   app.post('/api/register-sync', async (req: Request, res: Response) => {
     try {
@@ -393,7 +383,7 @@ async function startServer() {
 
       // Verify Firebase ID token (if Firebase Admin is configured)
       const admin = await getFirebaseAdmin();
-      if (admin && admin.apps.length > 0) {
+      if (admin && admin.apps?.length > 0) {
         try {
           await admin.auth().verifyIdToken(token);
         } catch (error: any) {
@@ -418,33 +408,71 @@ async function startServer() {
         return res.status(400).json({ success: false, error: 'Name is required' });
       }
 
-      // Append to Google Sheets
-      const spreadsheetId = process.env.GOOGLE_SHEETS_SPREADSHEET_ID;
-      if (!spreadsheetId) {
-        console.error('GOOGLE_SHEETS_SPREADSHEET_ID not configured');
+      // Get Apps Script configuration
+      const appsScriptUrl = process.env.GOOGLE_APPS_SCRIPT_URL;
+      const appsScriptSecret = process.env.GOOGLE_APPS_SCRIPT_SECRET;
+
+      if (!appsScriptUrl || !appsScriptSecret) {
+        console.error('Apps Script not configured');
         return res.status(500).json({ success: false, error: 'Server configuration error' });
       }
 
-      await sheets.spreadsheets.values.append({
-        spreadsheetId,
-        range: 'Registrations!A:F',
-        valueInputOption: 'RAW',
-        requestBody: {
-          values: [
-            [
-              new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }),
-              String(name).slice(0, 100),
-              '+91' + mobile,
-              String(address || '').slice(0, 300),
-              'New',
-              '',
-            ],
-          ],
+      // Generate a simple user ID from mobile number
+      const userId = `USER-${mobile}`;
+
+      // Call Apps Script
+      const response = await fetch(appsScriptUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
         },
+        body: JSON.stringify({
+          secret: appsScriptSecret,
+          action: 'upsertUser',
+          user: {
+            userId: userId,
+            customerName: name,
+            mobileNumber: '+91' + mobile,
+            mobileVerified: true,
+            email: '',
+            accountStatus: 'ACTIVE',
+            registrationDate: new Date().toISOString(),
+            lastLogin: new Date().toISOString(),
+            totalBookings: 0,
+            createdAt: new Date().toISOString(),
+          },
+        }),
       });
 
-      console.log(`Registration synced to sheets: ${name}, +91${mobile}`);
-      res.json({ success: true });
+      const rawText = await response.text();
+      let result: any = null;
+      try {
+        result = JSON.parse(rawText);
+      } catch {
+        console.warn('Apps Script returned non-JSON response:', rawText.slice(0, 300));
+        if (rawText.includes('Script function not found: doPost')) {
+          console.error(
+            'CRITICAL: Google Apps Script is missing "doPost" function! Please name the entry function doPost(e) and deploy a new version.'
+          );
+          return res.status(502).json({
+            success: false,
+            error:
+              'Google Apps Script configuration error: function "doPost" not found in deployed script. Please update your script with function doPost(e) and deploy a new version.',
+          });
+        }
+        return res.status(502).json({
+          success: false,
+          error: 'Google Apps Script returned an invalid response. Please check Apps Script deployment.',
+        });
+      }
+
+      if (!result.success) {
+        console.error('Apps Script sync failed:', result.message);
+        return res.status(500).json({ success: false, error: result.message || 'Failed to sync registration' });
+      }
+
+      console.log(`Registration synced to sheets via Apps Script: ${name}, +91${mobile}`);
+      res.json({ success: true, action: result.action });
     } catch (error: any) {
       console.error('Sheet sync failed:', error);
       res.status(500).json({ success: false, error: 'Failed to sync registration' });

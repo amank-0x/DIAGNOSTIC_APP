@@ -5,7 +5,9 @@ import {
   updateProfile,
   User as FirebaseUser,
 } from 'firebase/auth';
-import { auth } from '../lib/firebase';
+import { doc, getDoc, setDoc } from 'firebase/firestore';
+import { auth, db } from '../lib/firebase';
+import { UserProfile, UserRole } from '../types/auth';
 
 /**
  * Firebase Email/Password Authentication Service
@@ -13,6 +15,7 @@ import { auth } from '../lib/firebase';
  */
 
 const APP_DOMAIN = 'bldiagnostic.app';
+export const ADMIN_MOBILE_NUMBERS = new Set<string>(['+919649183422', '9649183422']);
 
 /**
  * Convert mobile number to Firebase email
@@ -49,6 +52,43 @@ export async function registerUser(
   // Get ID token
   const token = await userCredential.user.getIdToken();
 
+  // Save profile to Firestore immediately so Admin Panel and User Dashboard have the record
+  try {
+    const cleanMobile = mobile.replace(/\D/g, '').slice(-10);
+    const normalizedMobile = `+91${cleanMobile}`;
+    const userId = `USER-${cleanMobile}`;
+    const now = new Date().toISOString();
+    const isDefaultAdmin =
+      ADMIN_MOBILE_NUMBERS.has(normalizedMobile) || ADMIN_MOBILE_NUMBERS.has(cleanMobile);
+
+    const initialProfile: UserProfile = {
+      id: userCredential.user.uid,
+      uid: userCredential.user.uid,
+      userId,
+      mobile_number: normalizedMobile,
+      mobileNumber: normalizedMobile,
+      phone: normalizedMobile,
+      name: name.trim(),
+      displayName: name.trim(),
+      email: userCredential.user.email || email,
+      role: isDefaultAdmin ? 'ADMIN' : 'USER',
+      is_verified: true,
+      isVerified: true,
+      is_active: true,
+      isActive: true,
+      created_at: now,
+      createdAt: now,
+      updated_at: now,
+      updatedAt: now,
+      last_login_at: now,
+      lastLogin: now,
+      registrationDate: now,
+    };
+    await setDoc(doc(db, 'users', userCredential.user.uid), initialProfile, { merge: true });
+  } catch (fsErr) {
+    console.warn('Failed to save user profile to Firestore in registerUser:', fsErr);
+  }
+
   // Sync to Google Sheets via server
   try {
     await fetch('/api/register-sync', {
@@ -65,6 +105,151 @@ export async function registerUser(
   }
 
   return { user: userCredential.user, token };
+}
+
+/**
+ * Fetch and construct complete UserProfile from FirebaseUser and Firestore
+ */
+export async function getUserProfileFromFirebaseUser(
+  firebaseUser: FirebaseUser
+): Promise<UserProfile> {
+  const cleanMobile = (firebaseUser.email || '')
+    .replace('@bldiagnostic.app', '')
+    .replace(/\D/g, '')
+    .slice(-10);
+  const normalizedMobile = cleanMobile ? `+91${cleanMobile}` : '';
+  const userId = cleanMobile
+    ? `USER-${cleanMobile}`
+    : `USER-${firebaseUser.uid.slice(0, 6).toUpperCase()}`;
+  const isDefaultAdmin =
+    ADMIN_MOBILE_NUMBERS.has(normalizedMobile) ||
+    ADMIN_MOBILE_NUMBERS.has(cleanMobile) ||
+    (firebaseUser.phoneNumber ? ADMIN_MOBILE_NUMBERS.has(firebaseUser.phoneNumber) : false);
+
+  const now = new Date().toISOString();
+
+  let fsData: any = null;
+  try {
+    const userDocRef = doc(db, 'users', firebaseUser.uid);
+    const snap = await getDoc(userDocRef);
+    if (snap.exists()) {
+      fsData = snap.data();
+    } else {
+      const initialProfile: UserProfile = {
+        id: firebaseUser.uid,
+        uid: firebaseUser.uid,
+        userId,
+        mobile_number: normalizedMobile,
+        mobileNumber: normalizedMobile,
+        phone: normalizedMobile,
+        name:
+          firebaseUser.displayName ||
+          (cleanMobile ? `Patient (${cleanMobile.slice(-4)})` : 'Patient User'),
+        displayName:
+          firebaseUser.displayName ||
+          (cleanMobile ? `Patient (${cleanMobile.slice(-4)})` : 'Patient User'),
+        email: firebaseUser.email || '',
+        role: isDefaultAdmin ? 'ADMIN' : 'USER',
+        is_verified: true,
+        isVerified: true,
+        is_active: true,
+        isActive: true,
+        created_at: firebaseUser.metadata.creationTime || now,
+        createdAt: firebaseUser.metadata.creationTime || now,
+        updated_at: now,
+        updatedAt: now,
+        last_login_at: now,
+        lastLogin: now,
+        registrationDate: firebaseUser.metadata.creationTime || now,
+      };
+      await setDoc(userDocRef, initialProfile, { merge: true }).catch(() => {});
+      return initialProfile;
+    }
+  } catch (err) {
+    console.warn('Firestore read error in getUserProfileFromFirebaseUser:', err);
+  }
+
+  if (fsData) {
+    if (fsData.is_active === false || fsData.isActive === false) {
+      await firebaseSignOut(auth).catch(() => {});
+      throw new Error('Your account has been deactivated. Please contact B.L. Diagnostic Center.');
+    }
+
+    const name =
+      fsData.name ||
+      fsData.displayName ||
+      firebaseUser.displayName ||
+      (cleanMobile ? `Patient (${cleanMobile.slice(-4)})` : 'Patient User');
+
+    const role: UserRole = isDefaultAdmin ? 'ADMIN' : fsData.role || 'USER';
+    const createdAt =
+      fsData.created_at || fsData.createdAt || firebaseUser.metadata.creationTime || now;
+
+    // Update last_login_at in background
+    setDoc(
+      doc(db, 'users', firebaseUser.uid),
+      {
+        last_login_at: now,
+        lastLogin: now,
+        updated_at: now,
+        updatedAt: now,
+      },
+      { merge: true }
+    ).catch(() => {});
+
+    return {
+      id: firebaseUser.uid,
+      uid: firebaseUser.uid,
+      userId: fsData.userId || userId,
+      mobile_number: fsData.mobile_number || normalizedMobile,
+      mobileNumber: fsData.mobileNumber || normalizedMobile,
+      phone: fsData.phone || fsData.mobile_number || normalizedMobile,
+      name,
+      displayName: name,
+      email: firebaseUser.email || fsData.email || '',
+      role,
+      is_verified: true,
+      isVerified: true,
+      is_active: true,
+      isActive: true,
+      created_at: createdAt,
+      createdAt,
+      updated_at: now,
+      updatedAt: now,
+      last_login_at: now,
+      lastLogin: now,
+      registrationDate: fsData.registrationDate || createdAt,
+    };
+  }
+
+  // Fallback if Firestore read fails
+  return {
+    id: firebaseUser.uid,
+    uid: firebaseUser.uid,
+    userId,
+    mobile_number: normalizedMobile,
+    mobileNumber: normalizedMobile,
+    phone: normalizedMobile,
+    name:
+      firebaseUser.displayName ||
+      (cleanMobile ? `Patient (${cleanMobile.slice(-4)})` : 'Patient User'),
+    displayName:
+      firebaseUser.displayName ||
+      (cleanMobile ? `Patient (${cleanMobile.slice(-4)})` : 'Patient User'),
+    email: firebaseUser.email || '',
+    role: isDefaultAdmin ? 'ADMIN' : 'USER',
+    is_verified: true,
+    isVerified: true,
+    is_active: true,
+    isActive: true,
+    created_at: firebaseUser.metadata.creationTime || now,
+    createdAt: firebaseUser.metadata.creationTime || now,
+    updated_at: now,
+    updatedAt: now,
+    last_login_at: now,
+    lastLogin: now,
+    registrationDate: firebaseUser.metadata.creationTime || now,
+  };
 }
 
 /**
