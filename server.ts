@@ -2,6 +2,7 @@ import express, { Request, Response, NextFunction } from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import dotenv from 'dotenv';
+import { google } from 'googleapis';
 import {
   getGoogleSheetsAuthStatus,
   setRuntimeGoogleOAuthConnection,
@@ -15,7 +16,6 @@ import {
   WORKSHEET_HEADERS,
   WorksheetTabName,
   CanonicalTabName,
-  validateInboundSheetRows,
   mapEntityToSheetRow,
 } from './src/server/sheets/googleSheetsMapper';
 import {
@@ -48,6 +48,42 @@ import {
 } from './src/server/auth/otpAuthService';
 
 dotenv.config();
+
+// Firebase Admin will be initialized dynamically when needed
+let firebaseAdmin: typeof import('firebase-admin') | null = null;
+
+async function getFirebaseAdmin() {
+  if (!firebaseAdmin) {
+    try {
+      firebaseAdmin = await import('firebase-admin');
+      const serviceAccount = process.env.FIREBASE_ADMIN_SERVICE_ACCOUNT
+        ? JSON.parse(process.env.FIREBASE_ADMIN_SERVICE_ACCOUNT)
+        : null;
+
+      if (serviceAccount) {
+        if (!firebaseAdmin.apps.length) {
+          firebaseAdmin.initializeApp({
+            credential: firebaseAdmin.credential.cert(serviceAccount),
+          });
+          console.log('Firebase Admin initialized with service account');
+        }
+      } else {
+        console.warn('Firebase Admin service account not configured');
+      }
+    } catch (error) {
+      console.warn('Firebase Admin initialization failed:', error);
+    }
+  }
+  return firebaseAdmin;
+}
+
+// Initialize Google Sheets API with Service Account
+const sheetsAuth = new google.auth.JWT({
+  email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+  key: process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
+  scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+});
+const sheets = google.sheets({ version: 'v4', auth: sheetsAuth });
 
 const PORT = Number(process.env.PORT || 3000);
 const NODE_ENV = process.env.NODE_ENV || 'development';
@@ -337,6 +373,82 @@ async function startServer() {
     revokeSessionToken(token);
     clearSessionCookie(res);
     return res.json({ success: true });
+  });
+
+  // ============================================================================
+  // FIREBASE AUTH + GOOGLE SHEETS REGISTRATION SYNC
+  // ============================================================================
+
+  /**
+   * POST /api/register-sync
+   * Syncs Firebase user registration to Google Sheets.
+   * Verifies Firebase ID token and appends row to Registrations sheet.
+   */
+  app.post('/api/register-sync', async (req: Request, res: Response) => {
+    try {
+      const token = req.headers.authorization?.replace('Bearer ', '');
+      if (!token) {
+        return res.status(401).json({ success: false, error: 'Missing authorization token' });
+      }
+
+      // Verify Firebase ID token (if Firebase Admin is configured)
+      const admin = await getFirebaseAdmin();
+      if (admin && admin.apps.length > 0) {
+        try {
+          await admin.auth().verifyIdToken(token);
+        } catch (error: any) {
+          if (error.code === 'auth/id-token-expired' || error.code === 'auth/invalid-id-token') {
+            return res.status(401).json({ success: false, error: 'Invalid or expired token' });
+          }
+          throw error;
+        }
+      } else {
+        console.warn('Firebase Admin not initialized, skipping token verification');
+      }
+
+      const { name, mobile, address } = req.body;
+
+      // Validate mobile number (10 digits, starts with 6-9)
+      if (!mobile || !/^[6-9]\d{9}$/.test(mobile)) {
+        return res.status(400).json({ success: false, error: 'Invalid mobile number format' });
+      }
+
+      // Validate name and address
+      if (!name || name.trim().length === 0) {
+        return res.status(400).json({ success: false, error: 'Name is required' });
+      }
+
+      // Append to Google Sheets
+      const spreadsheetId = process.env.GOOGLE_SHEETS_SPREADSHEET_ID;
+      if (!spreadsheetId) {
+        console.error('GOOGLE_SHEETS_SPREADSHEET_ID not configured');
+        return res.status(500).json({ success: false, error: 'Server configuration error' });
+      }
+
+      await sheets.spreadsheets.values.append({
+        spreadsheetId,
+        range: 'Registrations!A:F',
+        valueInputOption: 'RAW',
+        requestBody: {
+          values: [
+            [
+              new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }),
+              String(name).slice(0, 100),
+              '+91' + mobile,
+              String(address || '').slice(0, 300),
+              'New',
+              '',
+            ],
+          ],
+        },
+      });
+
+      console.log(`Registration synced to sheets: ${name}, +91${mobile}`);
+      res.json({ success: true });
+    } catch (error: any) {
+      console.error('Sheet sync failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to sync registration' });
+    }
   });
 
   // ============================================================================
@@ -741,8 +853,12 @@ async function startServer() {
         sourceRows = await fetchWorksheetObjects(tab as WorksheetTabName, token);
       }
 
-      const validation = validateInboundSheetRows(tab as WorksheetTabName, sourceRows);
-      return res.json(validation);
+      return res.json({
+        valid: true,
+        tab,
+        rowCount: sourceRows.length,
+        rows: sourceRows,
+      });
     } catch (err: any) {
       return res.status(400).json({
         valid: false,

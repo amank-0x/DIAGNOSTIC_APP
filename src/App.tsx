@@ -17,6 +17,7 @@ import { UserDashboardView } from './components/dashboard/UserDashboardView';
 import { AdminPanel } from './components/AdminPanel';
 import { AuthProvider } from './contexts/AuthContext';
 import { AuthView } from './components/auth/AuthView';
+import { FirebaseAuthView } from './components/auth/FirebaseAuthView';
 import { UserDashboard } from './components/dashboard/UserDashboard';
 import { ProtectedRoute } from './components/auth/ProtectedRoute';
 import { DiagnosticTest } from './types';
@@ -237,14 +238,14 @@ export default function App() {
           )}
 
           {currentPage === 'login' && (
-            <AuthView
+            <FirebaseAuthView
               initialMode="login"
               onNavigate={handleNavigate}
             />
           )}
 
           {currentPage === 'register' && (
-            <AuthView
+            <FirebaseAuthView
               initialMode="register"
               onNavigate={handleNavigate}
             />
