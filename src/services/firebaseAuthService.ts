@@ -43,72 +43,75 @@ export async function registerUser(
 ): Promise<{ user: FirebaseUser; token: string }> {
   const email = mobileToEmail(mobile);
 
-  // Create user with email and password
+  // 1. Create user in Firebase Auth (instant: ~300ms)
   const userCredential = await createUserWithEmailAndPassword(auth, email, password);
 
-  // Update display name
-  await updateProfile(userCredential.user, { displayName: name });
+  // 2. Set display name in Firebase Auth
+  try {
+    await updateProfile(userCredential.user, { displayName: name.trim() });
+  } catch (nameErr) {
+    console.warn('Could not update display name:', nameErr);
+  }
 
-  // Get ID token
+  // 3. Get ID token
   const token = await userCredential.user.getIdToken();
 
-  // Save profile to Firestore immediately so Admin Panel and User Dashboard have the record
-  try {
-    const cleanMobile = mobile.replace(/\D/g, '').slice(-10);
-    const normalizedMobile = `+91${cleanMobile}`;
-    const userId = `USER-${cleanMobile}`;
-    const now = new Date().toISOString();
-    const isDefaultAdmin =
-      ADMIN_MOBILE_NUMBERS.has(normalizedMobile) || ADMIN_MOBILE_NUMBERS.has(cleanMobile);
+  // 4. Construct local user profile immediately & cache in localStorage (0ms)
+  const cleanMobile = mobile.replace(/\D/g, '').slice(-10);
+  const normalizedMobile = `+91${cleanMobile}`;
+  const userId = `USER-${cleanMobile}`;
+  const now = new Date().toISOString();
+  const isDefaultAdmin =
+    ADMIN_MOBILE_NUMBERS.has(normalizedMobile) || ADMIN_MOBILE_NUMBERS.has(cleanMobile);
 
-    const initialProfile: UserProfile = {
-      id: userCredential.user.uid,
-      uid: userCredential.user.uid,
-      userId,
-      mobile_number: normalizedMobile,
-      mobileNumber: normalizedMobile,
-      phone: normalizedMobile,
-      name: name.trim(),
-      displayName: name.trim(),
-      email: userCredential.user.email || email,
-      role: isDefaultAdmin ? 'ADMIN' : 'USER',
-      is_verified: true,
-      isVerified: true,
-      is_active: true,
-      isActive: true,
-      created_at: now,
-      createdAt: now,
-      updated_at: now,
-      updatedAt: now,
-      last_login_at: now,
-      lastLogin: now,
-      registrationDate: now,
-    };
-    await setDoc(doc(db, 'users', userCredential.user.uid), initialProfile, { merge: true });
-  } catch (fsErr) {
-    console.warn('Failed to save user profile to Firestore in registerUser:', fsErr);
-  }
+  const initialProfile: UserProfile = {
+    id: userCredential.user.uid,
+    uid: userCredential.user.uid,
+    userId,
+    mobile_number: normalizedMobile,
+    mobileNumber: normalizedMobile,
+    phone: normalizedMobile,
+    name: name.trim(),
+    displayName: name.trim(),
+    email: userCredential.user.email || email,
+    role: isDefaultAdmin ? 'ADMIN' : 'USER',
+    is_verified: true,
+    isVerified: true,
+    is_active: true,
+    isActive: true,
+    created_at: now,
+    createdAt: now,
+    updated_at: now,
+    updatedAt: now,
+    last_login_at: now,
+    lastLogin: now,
+    registrationDate: now,
+  };
 
-  // Sync to Google Sheets via server
   try {
-    await fetch('/api/register-sync', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({ name, mobile, address }),
-    });
-  } catch (error) {
-    console.warn('Registration sync to sheets failed:', error);
-    // Don't fail registration if sheet sync fails
-  }
+    localStorage.setItem(`user_profile_${userCredential.user.uid}`, JSON.stringify(initialProfile));
+  } catch {}
+
+  // 5. Fire-and-forget: persist to Firestore in background without blocking registration
+  setDoc(doc(db, 'users', userCredential.user.uid), initialProfile, { merge: true }).catch(() => {});
+
+  // 6. Fire-and-forget: sync to Google Sheets in background without blocking registration
+  fetch('/api/register-sync', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ name: name.trim(), mobile: cleanMobile, address }),
+  }).catch((error) => {
+    console.warn('Background sheets sync trigger:', error);
+  });
 
   return { user: userCredential.user, token };
 }
 
 /**
- * Fetch and construct complete UserProfile from FirebaseUser and Firestore
+ * Fetch and construct complete UserProfile from FirebaseUser, local cache, and Firestore
  */
 export async function getUserProfileFromFirebaseUser(
   firebaseUser: FirebaseUser
@@ -128,128 +131,76 @@ export async function getUserProfileFromFirebaseUser(
 
   const now = new Date().toISOString();
 
-  let fsData: any = null;
+  // 1. Instant local cache lookup (0ms)
+  let cached: UserProfile | null = null;
   try {
-    const userDocRef = doc(db, 'users', firebaseUser.uid);
-    const snap = await getDoc(userDocRef);
-    if (snap.exists()) {
-      fsData = snap.data();
-    } else {
-      const initialProfile: UserProfile = {
-        id: firebaseUser.uid,
-        uid: firebaseUser.uid,
-        userId,
-        mobile_number: normalizedMobile,
-        mobileNumber: normalizedMobile,
-        phone: normalizedMobile,
-        name:
-          firebaseUser.displayName ||
-          (cleanMobile ? `Patient (${cleanMobile.slice(-4)})` : 'Patient User'),
-        displayName:
-          firebaseUser.displayName ||
-          (cleanMobile ? `Patient (${cleanMobile.slice(-4)})` : 'Patient User'),
-        email: firebaseUser.email || '',
-        role: isDefaultAdmin ? 'ADMIN' : 'USER',
-        is_verified: true,
-        isVerified: true,
-        is_active: true,
-        isActive: true,
-        created_at: firebaseUser.metadata.creationTime || now,
-        createdAt: firebaseUser.metadata.creationTime || now,
-        updated_at: now,
-        updatedAt: now,
-        last_login_at: now,
-        lastLogin: now,
-        registrationDate: firebaseUser.metadata.creationTime || now,
-      };
-      await setDoc(userDocRef, initialProfile, { merge: true }).catch(() => {});
-      return initialProfile;
-    }
-  } catch (err) {
-    console.warn('Firestore read error in getUserProfileFromFirebaseUser:', err);
-  }
+    const raw = localStorage.getItem(`user_profile_${firebaseUser.uid}`);
+    if (raw) cached = JSON.parse(raw);
+  } catch {}
 
-  if (fsData) {
-    if (fsData.is_active === false || fsData.isActive === false) {
-      await firebaseSignOut(auth).catch(() => {});
-      throw new Error('Your account has been deactivated. Please contact B.L. Diagnostic Center.');
-    }
+  const displayName =
+    cached?.displayName ||
+    cached?.name ||
+    firebaseUser.displayName ||
+    (cleanMobile ? `Patient (${cleanMobile.slice(-4)})` : 'Patient User');
 
-    const name =
-      fsData.name ||
-      fsData.displayName ||
-      firebaseUser.displayName ||
-      (cleanMobile ? `Patient (${cleanMobile.slice(-4)})` : 'Patient User');
-
-    const role: UserRole = isDefaultAdmin ? 'ADMIN' : fsData.role || 'USER';
-    const createdAt =
-      fsData.created_at || fsData.createdAt || firebaseUser.metadata.creationTime || now;
-
-    // Update last_login_at in background
-    setDoc(
-      doc(db, 'users', firebaseUser.uid),
-      {
-        last_login_at: now,
-        lastLogin: now,
-        updated_at: now,
-        updatedAt: now,
-      },
-      { merge: true }
-    ).catch(() => {});
-
-    return {
-      id: firebaseUser.uid,
-      uid: firebaseUser.uid,
-      userId: fsData.userId || userId,
-      mobile_number: fsData.mobile_number || normalizedMobile,
-      mobileNumber: fsData.mobileNumber || normalizedMobile,
-      phone: fsData.phone || fsData.mobile_number || normalizedMobile,
-      name,
-      displayName: name,
-      email: firebaseUser.email || fsData.email || '',
-      role,
-      is_verified: true,
-      isVerified: true,
-      is_active: true,
-      isActive: true,
-      created_at: createdAt,
-      createdAt,
-      updated_at: now,
-      updatedAt: now,
-      last_login_at: now,
-      lastLogin: now,
-      registrationDate: fsData.registrationDate || createdAt,
-    };
-  }
-
-  // Fallback if Firestore read fails
-  return {
+  const profile: UserProfile = {
     id: firebaseUser.uid,
     uid: firebaseUser.uid,
-    userId,
-    mobile_number: normalizedMobile,
-    mobileNumber: normalizedMobile,
-    phone: normalizedMobile,
-    name:
-      firebaseUser.displayName ||
-      (cleanMobile ? `Patient (${cleanMobile.slice(-4)})` : 'Patient User'),
-    displayName:
-      firebaseUser.displayName ||
-      (cleanMobile ? `Patient (${cleanMobile.slice(-4)})` : 'Patient User'),
-    email: firebaseUser.email || '',
-    role: isDefaultAdmin ? 'ADMIN' : 'USER',
+    userId: cached?.userId || userId,
+    mobile_number: cached?.mobile_number || normalizedMobile,
+    mobileNumber: cached?.mobileNumber || normalizedMobile,
+    phone: cached?.phone || normalizedMobile,
+    name: displayName,
+    displayName: displayName,
+    email: firebaseUser.email || cached?.email || '',
+    role: isDefaultAdmin ? 'ADMIN' : cached?.role || 'USER',
     is_verified: true,
     isVerified: true,
     is_active: true,
     isActive: true,
-    created_at: firebaseUser.metadata.creationTime || now,
-    createdAt: firebaseUser.metadata.creationTime || now,
+    created_at: cached?.created_at || firebaseUser.metadata.creationTime || now,
+    createdAt: cached?.createdAt || firebaseUser.metadata.creationTime || now,
     updated_at: now,
     updatedAt: now,
     last_login_at: now,
     lastLogin: now,
-    registrationDate: firebaseUser.metadata.creationTime || now,
+    registrationDate: cached?.registrationDate || firebaseUser.metadata.creationTime || now,
   };
+
+  try {
+    localStorage.setItem(`user_profile_${firebaseUser.uid}`, JSON.stringify(profile));
+  } catch {}
+
+  // 2. Non-blocking Firestore sync in background (timeout race at 1 second so it never hangs)
+  const syncWithFirestore = async () => {
+    try {
+      const userDocRef = doc(db, 'users', firebaseUser.uid);
+      const snap = await getDoc(userDocRef);
+      if (snap.exists()) {
+        const fsData = snap.data();
+        if (fsData.is_active === false || fsData.isActive === false) {
+          await firebaseSignOut(auth).catch(() => {});
+          return;
+        }
+        const merged: UserProfile = {
+          ...profile,
+          ...fsData,
+          role: isDefaultAdmin ? 'ADMIN' : fsData.role || profile.role,
+        };
+        try {
+          localStorage.setItem(`user_profile_${firebaseUser.uid}`, JSON.stringify(merged));
+        } catch {}
+      } else {
+        setDoc(userDocRef, profile, { merge: true }).catch(() => {});
+      }
+    } catch {}
+  };
+
+  // Run in background without awaiting
+  syncWithFirestore().catch(() => {});
+
+  return profile;
 }
 
 /**

@@ -77,13 +77,11 @@ export const FirebaseAuthView: React.FC<FirebaseAuthViewProps> = ({
       await refreshUser();
       setSuccessMessage('Login successful! Redirecting...');
 
-      setTimeout(() => {
-        if (onSuccess) {
-          onSuccess();
-        } else {
-          onNavigate('dashboard');
-        }
-      }, 800);
+      if (onSuccess) {
+        onSuccess();
+      } else {
+        onNavigate('dashboard');
+      }
     } catch (err: any) {
       const errorCode = err.code;
       if (errorCode === 'auth/invalid-credential') {
@@ -131,13 +129,11 @@ export const FirebaseAuthView: React.FC<FirebaseAuthViewProps> = ({
       await refreshUser();
       setSuccessMessage('Registration successful! Redirecting...');
 
-      setTimeout(() => {
-        if (onSuccess) {
-          onSuccess();
-        } else {
-          onNavigate('dashboard');
-        }
-      }, 800);
+      if (onSuccess) {
+        onSuccess();
+      } else {
+        onNavigate('dashboard');
+      }
     } catch (err: any) {
       const errorCode = err.code;
       if (errorCode === 'auth/email-already-in-use') {

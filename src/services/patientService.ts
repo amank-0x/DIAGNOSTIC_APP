@@ -21,17 +21,37 @@ const PATIENTS_COLLECTION = 'patients';
  */
 export async function getPatientsForUser(userId: string): Promise<PatientRecord[]> {
   if (!userId) return [];
+
+  // Check localStorage cache first
   try {
-    const q = query(
-      collection(db, PATIENTS_COLLECTION),
-      where('user_id', '==', userId)
-    );
-    const snap = await getDocs(q);
-    const list: PatientRecord[] = [];
-    snap.forEach(d => list.push(d.data() as PatientRecord));
-    return list.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+    const raw = localStorage.getItem(`patients_${userId}`);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+  } catch {}
+
+  try {
+    const fetchFirestore = async (): Promise<PatientRecord[]> => {
+      const q = query(
+        collection(db, PATIENTS_COLLECTION),
+        where('user_id', '==', userId)
+      );
+      const snap = await getDocs(q);
+      const list: PatientRecord[] = [];
+      snap.forEach(d => list.push(d.data() as PatientRecord));
+      const sorted = list.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+      try {
+        localStorage.setItem(`patients_${userId}`, JSON.stringify(sorted));
+      } catch {}
+      return sorted;
+    };
+
+    return await Promise.race([
+      fetchFirestore(),
+      new Promise<PatientRecord[]>((resolve) => setTimeout(() => resolve([]), 800)),
+    ]);
   } catch (err) {
-    console.error('Error fetching patients for user:', err);
     return [];
   }
 }

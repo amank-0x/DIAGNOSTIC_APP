@@ -66,14 +66,21 @@ export async function deletePatientForUser(patientId: string): Promise<void> {
 }
 
 export async function getNotificationsForUser(userId: string): Promise<UserNotification[]> {
+  if (!userId) return [];
   try {
-    const q = query(collection(db, NOTIFICATIONS_COLLECTION), where('userId', '==', userId));
-    const snap = await getDocs(q);
-    const list: UserNotification[] = [];
-    snap.forEach((d) => list.push(d.data() as UserNotification));
-    return list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    const fetchFirestore = async (): Promise<UserNotification[]> => {
+      const q = query(collection(db, NOTIFICATIONS_COLLECTION), where('userId', '==', userId));
+      const snap = await getDocs(q);
+      const list: UserNotification[] = [];
+      snap.forEach((d) => list.push(d.data() as UserNotification));
+      return list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    };
+
+    return await Promise.race([
+      fetchFirestore(),
+      new Promise<UserNotification[]>((resolve) => setTimeout(() => resolve([]), 800)),
+    ]);
   } catch (err) {
-    console.error('Error fetching notifications:', err);
     return [];
   }
 }

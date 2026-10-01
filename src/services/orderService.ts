@@ -241,14 +241,21 @@ export async function createBookingOrder(params: {
  * Fetch all bookings for a user
  */
 export async function getBookingsForUser(userId: string): Promise<BookingRecord[]> {
+  if (!userId) return [];
   try {
-    const q = query(collection(db, BOOKINGS_COLLECTION), where('user_id', '==', userId));
-    const snap = await getDocs(q);
-    const list: BookingRecord[] = [];
-    snap.forEach(d => list.push(d.data() as BookingRecord));
-    return list.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+    const fetchFirestore = async (): Promise<BookingRecord[]> => {
+      const q = query(collection(db, BOOKINGS_COLLECTION), where('user_id', '==', userId));
+      const snap = await getDocs(q);
+      const list: BookingRecord[] = [];
+      snap.forEach(d => list.push(d.data() as BookingRecord));
+      return list.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+    };
+
+    return await Promise.race([
+      fetchFirestore(),
+      new Promise<BookingRecord[]>((resolve) => setTimeout(() => resolve([]), 800)),
+    ]);
   } catch (err) {
-    console.error('Error fetching bookings for user:', err);
     return [];
   }
 }
